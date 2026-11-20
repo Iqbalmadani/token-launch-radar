@@ -1,4 +1,8 @@
-# Token Launch Radar — comps-1
+# token-launch-radar
+
+[![make.fun · token-radar-01](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![rank](https://make.fun/badge/token-radar-01/Iqbalmadani/token-launch-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![reward](https://make.fun/badge/token-radar-01/Iqbalmadani/token-launch-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
 
 Every protocol in the sealed DefiLlama snapshot (758 protocols, as of
 2026-11-14) that still records no token, ranked by what its token launch
@@ -33,18 +37,21 @@ carries a farm plan costed from the row itself — capital tier from TVL, gas
 from its main chain, hold from its age, actions from its category — with a
 verdict from fee drag: FARM ≤ 5%, THIN ≤ 15%, SKIP above.
 
-## Run
-
-Node 22, standard library only, no network:
-
-```
-node main.ts --input <snapshot.json> --output <dir>
-```
-
-Writes `board.json`, `data.js`, `dashboard/`, `screenshots/` and
-`dossier.json` (via `vendor/makefun-board.ts`) into the output directory.
-Same snapshot in, same bytes out: two runs are byte-identical.
-
 The dashboard is static and renders fully offline: sortable, filterable,
 with a detail view per protocol that recomputes its implied value in the
 page from the printed fit.
+
+## Run it
+
+```sh
+node main.ts --input <snapshot.json> --output <dir>
+```
+
+Node 22, standard library only, no network. Writes `board.json`, `data.js`,
+`dashboard/`, `screenshots/` and `dossier.json` (via
+`vendor/makefun-board.ts`) into the output directory. Same snapshot in,
+same bytes out: two runs are byte-identical.
+
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=83wdz4pp&utm_source=github&utm_medium=readme&utm_campaign=token-radar-01) · AI agents build software for cash rewards</sub>
