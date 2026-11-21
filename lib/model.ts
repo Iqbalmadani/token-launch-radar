@@ -1,4 +1,4 @@
-// Token launch radar — model "comps-2".
+// Token launch radar — model "comps-3".
 //
 // One sealed DefiLlama snapshot in, one ranked board out. Nothing here touches
 // the network and nothing is keyed to a protocol's name: every number a row
@@ -44,6 +44,21 @@
 // every comp against the fitted curve and gives each row the middle-half
 // range of the comps' own residuals, so the model's scatter is on show.
 //
+// THE PRECEDENT MODEL
+// A second fit answers the radar's other question: how often does a protocol
+// like this one already have a token? A logistic regression over all 758
+// protocols — outcome "records a token" — on log TVL and log age:
+//
+//     logit(P(token)) = A2 + B2 * log10(tvl) + C2 * log10(1 + age_days)
+//
+// Read at a pre-token protocol, P is a precedent rate: the model's estimate,
+// from the snapshot's own population, of how token-like its profile is. It is
+// graded the same way as the value model — 5-fold held out, reporting AUC and
+// Brier score — and every row also carries the raw peer count behind it: how
+// many of its category peers in the snapshot already record a token. It is a
+// base rate, not a promise: it says what protocols with these figures usually
+// look like, never what this one will do.
+//
 // THE BOARD
 // Every watchlist slug, plus every other pre-token protocol the watchlist's
 // own exclusion rules let through (no wrapped/staked/bridged product, no
@@ -78,7 +93,7 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-export const MODEL_VERSION = 'comps-2';
+export const MODEL_VERSION = 'comps-3';
 
 /** Shrinkage for the category term: a category's median residual counts n/(n+K). */
 export const CATEGORY_SHRINK_K = 12;
@@ -267,6 +282,106 @@ export function validateModel(snapshot: Snapshot): { flat: number; curveCat: num
   return { flat: median(errs.flat), curveCat: median(errs.curveCat), full: median(errs.full), folds: FOLDS, comps: comps.length };
 }
 
+// ---------- the precedent model ----------
+
+const sigmoid = (z: number): number => 1 / (1 + Math.exp(-z));
+
+interface OddsRow { x: number[]; y: number }
+
+function oddsFeatures(snapshot: Snapshot, p: SnapshotProtocol): number[] {
+  const age = ageDays(snapshot.as_of, p.listed_at) ?? UNKNOWN_AGE_DAYS;
+  return [1, Math.log10(Math.max(1, p.tvl_usd)), Math.log10(1 + age)];
+}
+
+/** Logistic regression by Newton-Raphson on the normal equations, tiny ridge for stability. */
+function fitLogistic(rows: OddsRow[]): number[] {
+  let beta = [0, 0, 0];
+  for (let iter = 0; iter < 100; iter++) {
+    const g = [0, 0, 0];
+    const H = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (const r of rows) {
+      const z = beta[0]! * r.x[0]! + beta[1]! * r.x[1]! + beta[2]! * r.x[2]!;
+      const p = sigmoid(z);
+      const w = Math.max(1e-9, p * (1 - p));
+      for (let i = 0; i < 3; i++) {
+        g[i]! += r.x[i]! * (r.y - p);
+        for (let j = 0; j < 3; j++) H[i]![j]! += r.x[i]! * r.x[j]! * w;
+      }
+    }
+    H[0]![0]! += 1e-6; H[1]![1]! += 1e-6; H[2]![2]! += 1e-6;
+    const step = solve(H, g);
+    let mx = 0;
+    for (let i = 0; i < 3; i++) { beta[i]! += step[i]!; mx = Math.max(mx, Math.abs(step[i]!)); }
+    if (mx < 1e-10) break;
+  }
+  return beta;
+}
+
+/** Rank-based AUC with averaged ties (Mann-Whitney). */
+function aucOf(preds: { p: number; y: number }[]): number {
+  const sorted = [...preds].sort((a, b) => a.p - b.p);
+  let rankSumPos = 0, pos = 0, neg = 0;
+  let i = 0;
+  while (i < sorted.length) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1]!.p === sorted[i]!.p) j++;
+    const avgRank = (i + j) / 2 + 1;
+    for (let k = i; k <= j; k++) {
+      if (sorted[k]!.y === 1) { rankSumPos += avgRank; pos++; } else neg++;
+    }
+    i = j + 1;
+  }
+  if (pos === 0 || neg === 0) return 0.5;
+  return (rankSumPos - (pos * (pos + 1)) / 2) / (pos * neg);
+}
+
+export interface OddsFit {
+  a: number; b: number; c: number; auc: number; brier: number; base_brier: number;
+  base_rate_pct: number; n: number; folds: number;
+  coef: number[];
+}
+
+export function fitPrecedent(snapshot: Snapshot): OddsFit {
+  const all = [...snapshot.protocols].sort((x, y) => (x.slug < y.slug ? -1 : 1));
+  const rows: OddsRow[] = all.map((p) => ({ x: oddsFeatures(snapshot, p), y: isPreToken(p) ? 0 : 1 }));
+  const coef = fitLogistic(rows);
+  const FOLDS = 5;
+  const held: { p: number; y: number }[] = [];
+  for (let f = 0; f < FOLDS; f++) {
+    const train = rows.filter((_, i) => i % FOLDS !== f);
+    const test = rows.filter((_, i) => i % FOLDS === f);
+    const c = fitLogistic(train);
+    for (const r of test) held.push({ p: sigmoid(c[0]! * r.x[0]! + c[1]! * r.x[1]! + c[2]! * r.x[2]!), y: r.y });
+  }
+  const brier = held.reduce((s, r) => s + (r.p - r.y) ** 2, 0) / held.length;
+  const base = rows.reduce((s, r) => s + r.y, 0) / rows.length;
+  const round4 = (v: number) => Math.round(v * 10000) / 10000;
+  const round3 = (v: number) => Math.round(v * 1000) / 1000;
+  return {
+    a: round4(coef[0]!), b: round4(coef[1]!), c: round4(coef[2]!),
+    auc: round3(aucOf(held)), brier: round3(brier), base_brier: round3(base * (1 - base)),
+    base_rate_pct: Math.round(base * 1000) / 10, n: rows.length, folds: FOLDS, coef,
+  };
+}
+
+export function precedentPct(fit: OddsFit, snapshot: Snapshot, p: SnapshotProtocol): number {
+  const x = oddsFeatures(snapshot, p);
+  return Math.round(100 * sigmoid(fit.coef[0]! * x[0]! + fit.coef[1]! * x[1]! + fit.coef[2]! * x[2]!));
+}
+
+/** Category peer counts over the whole snapshot: how many peers record a token. */
+export function peerCounts(snapshot: Snapshot): Map<string, { total: number; token: number }> {
+  const out = new Map<string, { total: number; token: number }>();
+  for (const p of snapshot.protocols) {
+    const key = p.category ?? '(none)';
+    const e = out.get(key) ?? { total: 0, token: 0 };
+    e.total++;
+    if (!isPreToken(p)) e.token++;
+    out.set(key, e);
+  }
+  return out;
+}
+
 // ---------- farm plans ----------
 
 export interface FarmPlan {
@@ -376,6 +491,9 @@ export interface BoardRow {
   maturity_multiplier: number;
   range_low_usd: number;
   range_high_usd: number;
+  precedent_pct: number;
+  peer_total: number;
+  peer_token: number;
   farm: Omit<FarmPlan, 'steps'>;
   farm_steps: string[];
 }
@@ -397,6 +515,7 @@ export interface RadarData {
   model_version: string;
   fit: { a: number; b: number; g: number; r2: number; comps: number; resid_q25: number; resid_q75: number };
   validation: { flat: number; curveCat: number; full: number; folds: number; comps: number };
+  odds: { a: number; b: number; c: number; auc: number; brier: number; base_brier: number; base_rate_pct: number; n: number; folds: number };
   funnel: Funnel;
   rows: BoardRow[];
   comps: { t: number; m: number }[];
@@ -406,6 +525,8 @@ export interface RadarData {
 export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
   const fit = fitModel(snapshot);
   const validation = validateModel(snapshot);
+  const oddsFit = fitPrecedent(snapshot);
+  const peers = peerCounts(snapshot);
   const watch = new Set(snapshot.watchlist);
 
   const chosen = new Map<string, SnapshotProtocol>();
@@ -455,6 +576,9 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       maturity_multiplier: Math.round(s.m.maturityMult * 1000) / 1000,
       range_low_usd: Math.max(1, Math.round(s.implied * Math.pow(10, fit.residQ25))),
       range_high_usd: Math.round(s.implied * Math.pow(10, fit.residQ75)),
+      precedent_pct: precedentPct(oddsFit, snapshot, s.p),
+      peer_total: peers.get(s.p.category ?? '(none)')?.total ?? 0,
+      peer_token: peers.get(s.p.category ?? '(none)')?.token ?? 0,
       farm,
       farm_steps: steps,
     };
@@ -475,6 +599,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     model_version: MODEL_VERSION,
     fit: { a: round4(fit.a), b: round4(fit.b), g: round4(fit.g), r2: round3(fit.r2), comps: fit.comps, resid_q25: round3(fit.residQ25), resid_q75: round3(fit.residQ75) },
     validation,
+    odds: { a: oddsFit.a, b: oddsFit.b, c: oddsFit.c, auc: oddsFit.auc, brier: oddsFit.brier, base_brier: oddsFit.base_brier, base_rate_pct: oddsFit.base_rate_pct, n: oddsFit.n, folds: oddsFit.folds },
     funnel: {
       protocols: snapshot.protocols.length,
       token_recorded: snapshot.protocols.length - preCount,

@@ -34,6 +34,14 @@ model's median error is **3.38×**, against **4.96×** for the flat
 The dashboard prints this table from the run's own computation, and plots
 every comp against the fitted line.
 
+A second fit, the **precedent model**, rates how token-like each profile
+is: a logistic regression over all 758 protocols (outcome: records a
+token) on log TVL and log age. Held out it scores AUC **0.626** and Brier
+**0.237** against 0.248 for always answering the 54.9% base rate — a
+modest, honestly-reported edge. Every row carries its precedent estimate
+plus the raw peer count behind it (how many of its category peers already
+record a token).
+
 ## The board
 
 198 rows: all 40 watchlist protocols, plus every other pre-token protocol
@@ -44,8 +52,13 @@ from its main chain, hold from its age, actions from its category — with a
 verdict from fee drag: FARM ≤ 5%, THIN ≤ 15%, SKIP above.
 
 The dashboard is static and renders fully offline: sortable, filterable,
-with a detail view per protocol that recomputes its implied value in the
-page from the printed fit.
+exportable to CSV, with pins, a side-by-side compare view for up to three
+protocols, and a Ctrl+K command palette. Each protocol's detail view has
+three tabs — the costed farm plan; the model math, recomputed in the page
+from the printed fits (value and precedent alike); and a capital
+simulator that runs the plan's economics under stated reward assumptions
+(pool size and wallet share, both set by the reader) and reports the
+reward range, the net of fees, and the break-even pool.
 
 ## Run it
 
