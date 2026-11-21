@@ -14,7 +14,7 @@ const bySlug = new Map(R.rows.map((r) => [r.slug, r]));
 
 $('#sub').textContent =
   `Every protocol DefiLlama tracked at ${R.as_of} that still records no token, ranked by what its launch would be worth — ` +
-  `priced by a curve fitted to the ${R.fit.comps} protocols in the same snapshot whose tokens already trade, and graded held-out below. ` +
+  `priced by a surface fitted to the ${R.fit.comps} protocols in the same snapshot whose tokens already trade, and graded held-out below. ` +
   `Source: ${R.source}.`;
 
 /* ---------- header strips: KPIs, the model, the accounting ---------- */
@@ -31,20 +31,48 @@ function kpis() {
   return `<section class="kpis">${k.map(([b, s]) => `<div class="kpi"><b>${b}</b><span>${s}</span></div>`).join('')}</section>`;
 }
 
+function scatter() {
+  const pts = R.comps, f = R.fit;
+  const W = 720, H = 272, L = 66, B = 24, T = 8, Rt = 38;
+  const xs = pts.map((p) => Math.log10(p.t)), ys = pts.map((p) => Math.log10(p.m));
+  const x0 = Math.floor(Math.min(...xs)), x1 = Math.ceil(Math.max(...xs));
+  const y0 = Math.floor(Math.min(...ys)), y1 = Math.ceil(Math.max(...ys));
+  const X = (v) => L + ((v - x0) / (x1 - x0)) * (W - L - Rt);
+  const Y = (v) => H - B - ((v - y0) / (y1 - y0)) * (H - B - T);
+  let grid = '';
+  for (let v = x0; v <= x1; v++) grid += `<line x1="${X(v)}" y1="${T}" x2="${X(v)}" y2="${H - B}" stroke="#232e3a"/><text x="${X(v)}" y="${H - 8}" fill="#5d6d7c" font-size="10" text-anchor="middle" font-family="monospace">${fmt$(Math.pow(10, v))}</text>`;
+  for (let v = y0; v <= y1; v++) grid += `<line x1="${L}" y1="${Y(v)}" x2="${W - Rt}" y2="${Y(v)}" stroke="#232e3a"/><text x="${L - 6}" y="${Y(v) + 3}" fill="#5d6d7c" font-size="10" text-anchor="end" font-family="monospace">${fmt$(Math.pow(10, v))}</text>`;
+  const line = (off) => { let d = ''; for (let i = 0; i <= 24; i++) { const lx = x0 + ((x1 - x0) * i) / 24; d += (i ? 'L' : 'M') + X(lx).toFixed(1) + ' ' + Y(f.a + f.b * lx + off).toFixed(1) + ' '; } return d; };
+  const dots = pts.map((p) => `<circle cx="${X(Math.log10(p.t)).toFixed(1)}" cy="${Y(Math.log10(p.m)).toFixed(1)}" r="2.6" fill="#2dd4bf" opacity="0.55"/>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" role="img" aria-label="Scatter of the ${pts.length} live-token comps, market cap against TVL on log scales, with the fitted line">
+    ${grid}${dots}
+    <path d="${line(f.resid_q25)}" fill="none" stroke="#ffb224" stroke-width="1" stroke-dasharray="4 4" opacity="0.45"/>
+    <path d="${line(f.resid_q75)}" fill="none" stroke="#ffb224" stroke-width="1" stroke-dasharray="4 4" opacity="0.45"/>
+    <path d="${line(0)}" fill="none" stroke="#ffb224" stroke-width="2.2"/>
+    <text x="${W - Rt}" y="${H}" fill="#5d6d7c" font-size="10" text-anchor="end" font-family="monospace">TVL →</text>
+  </svg>
+  <p class="note" style="margin-top:2px">Every comp plotted: market cap against TVL, log scales. Amber is the fitted size line at zero momentum;
+  the dashed pair is the middle half of the comps' own residuals — the scatter the model honestly carries, and the range each row's detail view quotes.</p>`;
+}
+
 function modelPanel() {
   const f = R.fit, v = R.validation;
   return `<section class="panel amber">
     <h2>The value model — fitted to the snapshot's own market, then graded held-out</h2>
-    <p class="formula">log10(market cap) = ${f.a} + ${f.b} × log10(TVL) &nbsp;·&nbsp; fitted on ${f.comps} live-token comps, R² ${f.r2}</p>
-    <p class="note">A pre-token protocol's base value is that curve read at its own TVL, moved by its category's median
-    residual among the comps (shrunk by n/(n+12) so thin categories barely count), then tilted by momentum
-    (1 + clamped 7-day change × 0.5) and by track record (0.6–1.0 over three years without a token).
-    No protocol's name is an input. The grading below is 5-fold held-out, recomputed on every run of the program:
-    each fold's comps are predicted from a fit on the other four.</p>
+    <p class="formula">log10(market cap) = ${f.a} + ${f.b} × log10(TVL) + ${f.g} × momentum &nbsp;·&nbsp; fitted on ${f.comps} live-token comps, R² ${f.r2}</p>
+    <p class="note">Momentum (the 7-day TVL change, winsorized at ±25% so one wild week moves a price at most ~2.2x) is inside
+    the fit, not bolted on: it earned its coefficient on the comps — a negative one, because freshly surging TVL prices
+    cheaper per dollar among tokens that already trade — and chain count and age were tried as further terms and
+    rejected, both grading worse held out. A pre-token
+    protocol's base value is the fitted surface read at its own figures, moved by its category's median residual among
+    the comps (shrunk by n/(n+12) so thin categories barely count), then tilted once, by track record
+    (0.6–1.0 over three years without a token). No protocol's name is an input. The grading below is 5-fold held-out,
+    recomputed on every run of the program: each fold's comps are predicted from a fit on the other four.</p>
+    ${scatter()}
     <table class="val"><thead><tr><th>Model</th><th>Median held-out error</th><th>Reading</th></tr></thead><tbody>
       <tr><td>Flat 0.25 × TVL (the starter rule)</td><td>${v.flat.toFixed(2)}x</td><td>a typical comp is missed by this factor</td></tr>
-      <tr><td>Comps curve, no category term</td><td>${v.curve.toFixed(2)}x</td><td>size alone, fitted</td></tr>
-      <tr><td class="best">Comps curve + category term — this board</td><td class="best">${v.curveCat.toFixed(2)}x</td><td>the model every row below is priced with</td></tr>
+      <tr><td>Size-only curve + category term</td><td>${v.curveCat.toFixed(2)}x</td><td>TVL alone, fitted</td></tr>
+      <tr><td class="best">Fitted surface, momentum inside + category term — this board</td><td class="best">${v.full.toFixed(2)}x</td><td>the model every row below is priced with</td></tr>
     </tbody></table>
   </section>`;
 }
@@ -126,7 +154,7 @@ function livePanel() {
 /* ---------- detail view ---------- */
 function detailView(r) {
   const f = R.fit;
-  const recomputed = Math.round(Math.pow(10, f.a + f.b * Math.log10(Math.max(1, r.tvl_usd)) + r.category_adj_log10) * r.growth_multiplier * r.maturity_multiplier);
+  const recomputed = Math.round(Math.pow(10, f.a + f.b * Math.log10(Math.max(1, r.tvl_usd)) + f.g * r.growth_term + r.category_adj_log10) * r.maturity_multiplier);
   const drift = Math.abs(recomputed - r.implied_value_usd) / r.implied_value_usd;
   const stat = (b, s) => `<div class="stat"><b>${b}</b><span>${s}</span></div>`;
   return `<p><a class="back" href="#/">← back to the board</a></p>
@@ -147,10 +175,12 @@ function detailView(r) {
     <ol class="steps">${r.farm_steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
   </section>  <section class="panel"><h2>How this value is derived — recomputed here, in the page</h2>
     <div class="calc">
-      curve base&nbsp;&nbsp;= 10^(${f.a} + ${f.b} × log10(${fmtN(r.tvl_usd)})) = ${fmt$(Math.pow(10, f.a + f.b * Math.log10(Math.max(1, r.tvl_usd))))}<br>
+      size line&nbsp;&nbsp;&nbsp;= 10^(${f.a} + ${f.b} × log10(${fmtN(r.tvl_usd)})) = ${fmt$(Math.pow(10, f.a + f.b * Math.log10(Math.max(1, r.tvl_usd))))}<br>
+      momentum term = 10^(${f.g} × ${r.growth_term}) — its 7-day TVL change of ${pct(r.change_7d)}, clamped, inside the fit<br>
       category term = 10^(${r.category_adj_log10}) from ${r.category_comps} comps in ${esc(r.category || '(none)')} → base ${fmt$(r.base_value_usd)}<br>
-      momentum tilt × ${r.growth_multiplier} &nbsp;·&nbsp; track-record tilt × ${r.maturity_multiplier}<br>
-      implied value = ${fmt$(recomputed)} <span class="ok">— recomputed in this page from the printed fit; ${drift < 0.005 ? 'matches' : 'within ' + (drift * 100).toFixed(1) + '% of'} the ${fmt$(r.implied_value_usd)} in board.json (fit constants are printed to 4 decimals)</span>
+      track-record tilt × ${r.maturity_multiplier}<br>
+      implied value = ${fmt$(recomputed)} <span class="ok">— recomputed in this page from the printed fit; ${drift < 0.005 ? 'matches' : 'within ' + (drift * 100).toFixed(1) + '% of'} the ${fmt$(r.implied_value_usd)} in board.json (fit constants are printed to 4 decimals)</span><br>
+      honest range&nbsp;&nbsp;= ${fmt$(r.range_low_usd)} – ${fmt$(r.range_high_usd)} — the middle half of the comps' own residuals (10^${f.resid_q25} to 10^${f.resid_q75}) carried onto this row
     </div>
     <p class="note">Read it as the market's own pricing carried across: protocols like this one, at this size, in this category,
     trade at these values today. It is a claim about what a launch would be worth if the record stayed as it is — not a prediction that a token comes.</p>
@@ -181,7 +211,7 @@ render();
 
 $('#foot').innerHTML =
   `<p><b>Method, in one breath:</b> the sealed snapshot (${esc(R.source)}) is the only input. Live-token protocols in it are the comps; ` +
-  `a log-log curve of market cap on TVL plus a shrunk category term prices every pre-token protocol; momentum and track record tilt the ranking; ` +
+  `a fitted surface of market cap on TVL and momentum, plus a shrunk category term, prices every pre-token protocol; track record tilts the ranking; ` +
   `farm plans are costed from each protocol's own chain, category, TVL and age, and verdicted on fee drag (FARM ≤ 5%, THIN ≤ 15%, SKIP above).</p>` +
   `<p>Gas price list used by every plan (per transaction): Ethereum $12 · Base $0.80 · Arbitrum $0.60 · Optimism $0.60 · Avalanche $0.50 · BNB Chain $0.40 · Tron $0.30 · Polygon $0.10 · Solana $0.05 · Sui $0.05 · Aptos $0.05 · any other chain $0.50. ` +
   `The page renders with no network; the board it shows is the board.json the program wrote, and each detail view recomputes its value from the printed fit.</p>`;

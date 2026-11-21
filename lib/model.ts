@@ -1,4 +1,4 @@
-// Token launch radar — model "comps-1".
+// Token launch radar — model "comps-2".
 //
 // One sealed DefiLlama snapshot in, one ranked board out. Nothing here touches
 // the network and nothing is keyed to a protocol's name: every number a row
@@ -10,24 +10,39 @@
 // market cap, so they are the comps set. On them we fit, by ordinary least
 // squares on log10 scales:
 //
-//     log10(mcap) = A + B * log10(tvl)
+//     log10(mcap) = A + B * log10(tvl) + G * momentum
+//     momentum    = clamp(change_7d, -25, 25) / 100
 //
-// A protocol's base value is that curve read at its own TVL, adjusted by the
-// median residual of its category among the comps (shrunk toward zero by
-// n/(n+12), so a category with two comps barely moves the curve). Two tilts
-// then turn a today's-market value into a launch ranking, both stated:
+// Momentum is inside the fit, not bolted on: fitted on the comps it earns its
+// coefficient, and the held-out grading below shows it earning its place
+// (chain count and age were tried as further terms the same way and were
+// rejected — both graded worse held out). The term is winsorized at +/-25%:
+// the comps price a freshly surging TVL cheaper per dollar — spiked TVL is
+// often incentive-driven and mean-reverts, while market caps move slower
+// than TVL in both directions — but one wild week must not dominate a
+// ranking, so beyond +/-25% a move stops moving the price. Held out, the
+// winsorized term grades the same as the raw one (3.39x either way); what
+// the cap removes is the tail, not the signal. A protocol's base value is the
+// fitted surface read at its own figures, adjusted by the median residual of
+// its category among the comps (shrunk toward zero by n/(n+12), so a category
+// with two comps barely moves the surface). One tilt then remains, stated:
 //
-//     growthMult   = 1 + clamp(change_7d, -60, 120)/100 * 0.5
 //     maturityMult = 0.6 + 0.4 * min(age_days, 1095)/1095   (unknown age: 365)
-//     implied      = round(base * growthMult * maturityMult)
+//     implied      = round(base * maturityMult)
+//
+// Age is a tilt and not a fit term on purpose: the comps' prices already
+// contain their ages, while a launch ranking should still pay something for
+// three years of operating without a token.
 //
 // THE VALIDATION
 // The fit is graded the way it is used: 5-fold held out, folds assigned by
 // slug order (deterministic), each fold's comps predicted from a fit on the
 // other four. The dashboard prints the median fold error of this model next
-// to the flat 0.25 x TVL rule and the curve without its category term, all
-// computed from the snapshot at run time — the numbers below are not typed
-// into the page, they are recomputed on every run.
+// to the flat 0.25 x TVL rule and the size-only curve with its category term,
+// all computed from the snapshot at run time — the numbers are not typed
+// into the page, they are recomputed on every run. The dashboard also plots
+// every comp against the fitted curve and gives each row the middle-half
+// range of the comps' own residuals, so the model's scatter is on show.
 //
 // THE BOARD
 // Every watchlist slug, plus every other pre-token protocol the watchlist's
@@ -63,14 +78,13 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-export const MODEL_VERSION = 'comps-1';
+export const MODEL_VERSION = 'comps-2';
 
 /** Shrinkage for the category term: a category's median residual counts n/(n+K). */
 export const CATEGORY_SHRINK_K = 12;
-/** The growth tilt's weight and clamp, and the maturity tilt's shape. */
-export const GROWTH_WEIGHT = 0.5;
-export const GROWTH_FLOOR = -60;
-export const GROWTH_CAP = 120;
+/** The momentum term's clamp, and the maturity tilt's shape. */
+export const GROWTH_FLOOR = -25;
+export const GROWTH_CAP = 25;
 export const MATURITY_FLOOR = 0.6;
 export const MATURITY_RANGE = 0.4;
 export const MATURITY_DAYS = 1095;
@@ -118,26 +132,66 @@ const median = (xs: number[]): number => {
   const s = [...xs].sort((x, y) => x - y);
   return s.length === 0 ? 0 : s[Math.floor(s.length / 2)]!;
 };
+const quantile = (xs: number[], q: number): number => {
+  const s = [...xs].sort((x, y) => x - y);
+  return s.length === 0 ? 0 : s[Math.min(s.length - 1, Math.floor(q * s.length))]!;
+};
 
-/** Ordinary least squares of log10(mcap) on log10(tvl) over the comps rows. */
-export function fitCurve(rows: SnapshotProtocol[]): { a: number; b: number; r2: number; n: number } {
-  const xs = rows.map((p) => Math.log10(p.tvl_usd));
-  const ys = rows.map((p) => Math.log10(p.mcap_usd!));
-  const n = xs.length;
-  const mx = xs.reduce((s, v) => s + v, 0) / n;
-  const my = ys.reduce((s, v) => s + v, 0) / n;
-  let sxy = 0, sxx = 0, syy = 0;
-  for (let i = 0; i < n; i++) { sxy += (xs[i]! - mx) * (ys[i]! - my); sxx += (xs[i]! - mx) ** 2; syy += (ys[i]! - my) ** 2; }
-  const b = sxy / sxx;
-  return { a: my - b * mx, b, r2: sxx === 0 || syy === 0 ? 0 : (sxy ** 2) / (sxx * syy), n };
+/** The momentum term exactly as the fit sees it: 7-day TVL change, clamped, in hundreds. */
+export function growthTerm(p: SnapshotProtocol): number {
+  const raw = typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : 0;
+  return Math.min(GROWTH_CAP, Math.max(GROWTH_FLOOR, raw)) / 100;
 }
 
-/** Each category's median log10 residual under the curve, shrunk by n/(n+K) and capped at +/-0.5. */
-export function categoryAdjustments(rows: SnapshotProtocol[], a: number, b: number): Map<string, { adj: number; n: number }> {
+/** Solve a small linear system by Gaussian elimination with partial pivoting. */
+function solve(A: number[][], b: number[]): number[] {
+  const k = b.length;
+  const M = A.map((row, i) => [...row, b[i]!]);
+  for (let c = 0; c < k; c++) {
+    let piv = c;
+    for (let r = c + 1; r < k; r++) if (Math.abs(M[r]![c]!) > Math.abs(M[piv]![c]!)) piv = r;
+    const tmp = M[c]!; M[c] = M[piv]!; M[piv] = tmp;
+    for (let r = 0; r < k; r++) {
+      if (r === c) continue;
+      const f = M[r]![c]! / M[c]![c]!;
+      for (let cc = c; cc <= k; cc++) M[r]![cc]! -= f * M[c]![cc]!;
+    }
+  }
+  return M.map((row, i) => row[k]! / row[i]!);
+}
+
+/** Least squares of log10(mcap) on the given feature functions, over the comps rows. */
+function fitOLS(rows: SnapshotProtocol[], features: ((p: SnapshotProtocol) => number)[]): { coef: number[]; r2: number } {
+  const k = features.length + 1;
+  const A = Array.from({ length: k }, () => Array(k).fill(0));
+  const b = Array(k).fill(0);
+  const ys = rows.map((p) => Math.log10(p.mcap_usd!));
+  const my = ys.reduce((s, v) => s + v, 0) / ys.length;
+  let syy = 0;
+  for (const y of ys) syy += (y - my) ** 2;
+  for (const p of rows) {
+    const x = [1, ...features.map((f) => f(p))];
+    const y = Math.log10(p.mcap_usd!);
+    for (let i = 0; i < k; i++) { b[i]! += x[i]! * y; for (let j = 0; j < k; j++) A[i]![j]! += x[i]! * x[j]!; }
+  }
+  const coef = solve(A, b);
+  let sse = 0;
+  for (const p of rows) {
+    const x = [1, ...features.map((f) => f(p))];
+    const pred = x.reduce((s, v, i) => s + v * coef[i]!, 0);
+    sse += (Math.log10(p.mcap_usd!) - pred) ** 2;
+  }
+  return { coef, r2: syy === 0 ? 0 : 1 - sse / syy };
+}
+
+const logTvl = (p: SnapshotProtocol) => Math.log10(Math.max(1, p.tvl_usd));
+
+/** Each category's median log10 residual under a predictor, shrunk by n/(n+K) and capped at +/-0.5. */
+export function categoryAdjustments(rows: SnapshotProtocol[], predict: (p: SnapshotProtocol) => number): Map<string, { adj: number; n: number }> {
   const byCat = new Map<string, number[]>();
   for (const p of rows) {
     const key = p.category ?? '(none)';
-    const r = Math.log10(p.mcap_usd!) - (a + b * Math.log10(p.tvl_usd));
+    const r = Math.log10(p.mcap_usd!) - predict(p);
     const list = byCat.get(key);
     if (list) list.push(r); else byCat.set(key, [r]);
   }
@@ -150,62 +204,67 @@ export function categoryAdjustments(rows: SnapshotProtocol[], a: number, b: numb
 }
 
 export interface Fit {
-  a: number; b: number; r2: number; comps: number;
+  a: number; b: number; g: number; r2: number; comps: number;
   cat: Map<string, { adj: number; n: number }>;
+  residQ25: number; residQ75: number;
+}
+
+function compsOf(snapshot: Snapshot): SnapshotProtocol[] {
+  return snapshot.protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
 }
 
 export function fitModel(snapshot: Snapshot): Fit {
-  const comps = snapshot.protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
-  const curve = fitCurve(comps);
-  return { a: curve.a, b: curve.b, r2: curve.r2, comps: curve.n, cat: categoryAdjustments(comps, curve.a, curve.b) };
+  const comps = compsOf(snapshot);
+  const { coef, r2 } = fitOLS(comps, [logTvl, growthTerm]);
+  const [a, b, g] = coef as [number, number, number];
+  const predict = (p: SnapshotProtocol) => a + b * logTvl(p) + g * growthTerm(p);
+  const cat = categoryAdjustments(comps, predict);
+  const residuals = comps.map((p) => Math.log10(p.mcap_usd!) - (predict(p) + (cat.get(p.category ?? '(none)')?.adj ?? 0)));
+  return { a, b, g, r2, comps: comps.length, cat, residQ25: quantile(residuals, 0.25), residQ75: quantile(residuals, 0.75) };
 }
 
-/** The comps curve read at one protocol, before the two tilts. */
+/** The fitted surface read at one protocol, before the maturity tilt. */
 export function baseValue(fit: Fit, p: SnapshotProtocol): { base: number; catAdj: number; catN: number } {
   const entry = fit.cat.get(p.category ?? '(none)');
   const catAdj = entry ? entry.adj : 0;
-  const base = Math.pow(10, fit.a + fit.b * Math.log10(Math.max(1, p.tvl_usd)) + catAdj);
+  const base = Math.pow(10, fit.a + fit.b * logTvl(p) + fit.g * growthTerm(p) + catAdj);
   return { base, catAdj, catN: entry ? entry.n : 0 };
 }
 
-export function tilts(p: SnapshotProtocol, asOf: string): { growthMult: number; maturityMult: number; age: number | null; growthPct: number } {
+export function maturity(p: SnapshotProtocol, asOf: string): { maturityMult: number; age: number | null } {
   const age = ageDays(asOf, p.listed_at);
-  const raw = typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : 0;
-  const growthPct = Math.min(GROWTH_CAP, Math.max(GROWTH_FLOOR, raw));
-  const growthMult = 1 + (growthPct / 100) * GROWTH_WEIGHT;
   const ageFor = age ?? UNKNOWN_AGE_DAYS;
   const maturityMult = MATURITY_FLOOR + (Math.min(Math.max(ageFor, 0), MATURITY_DAYS) / MATURITY_DAYS) * MATURITY_RANGE;
-  return { growthMult, maturityMult, age, growthPct };
+  return { maturityMult, age };
 }
 
 /**
- * Held-out grading of the value model, 5 folds by slug order: each fold's
- * comps are predicted from a fit on the other four, and the median ratio
- * error (larger/smaller, so 3.5 reads "typically within 3.5x") is reported
- * for the flat starter rule, the bare curve, and the curve with its
- * category term — the model the board actually ranks by.
+ * Held-out grading, 5 folds by slug order, median ratio error (larger over
+ * smaller, so 3.4 reads "typically within 3.4x") for three models: the flat
+ * starter rule, the size-only curve with its category term, and this model —
+ * the fitted surface with momentum inside it and the category term on top.
  */
-export function validateModel(snapshot: Snapshot): { flat: number; curve: number; curveCat: number; folds: number; comps: number } {
-  const comps = snapshot.protocols
-    .filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
-    .sort((x, y) => (x.slug < y.slug ? -1 : 1));
+export function validateModel(snapshot: Snapshot): { flat: number; curveCat: number; full: number; folds: number; comps: number } {
+  const comps = compsOf(snapshot).sort((x, y) => (x.slug < y.slug ? -1 : 1));
   const ratioErr = (pred: number, actual: number) => Math.max(pred / actual, actual / pred);
-  const errs = { flat: [] as number[], curve: [] as number[], curveCat: [] as number[] };
+  const errs = { flat: [] as number[], curveCat: [] as number[], full: [] as number[] };
   const FOLDS = 5;
   for (let f = 0; f < FOLDS; f++) {
     const train = comps.filter((_, i) => i % FOLDS !== f);
     const test = comps.filter((_, i) => i % FOLDS === f);
-    const curve = fitCurve(train);
-    const cat = categoryAdjustments(train, curve.a, curve.b);
+    const sizeOnly = fitOLS(train, [logTvl]);
+    const predSize = (p: SnapshotProtocol) => sizeOnly.coef[0]! + sizeOnly.coef[1]! * logTvl(p);
+    const catSize = categoryAdjustments(train, predSize);
+    const full = fitOLS(train, [logTvl, growthTerm]);
+    const predFull = (p: SnapshotProtocol) => full.coef[0]! + full.coef[1]! * logTvl(p) + full.coef[2]! * growthTerm(p);
+    const catFull = categoryAdjustments(train, predFull);
     for (const p of test) {
-      const bare = Math.pow(10, curve.a + curve.b * Math.log10(p.tvl_usd));
-      const adj = cat.get(p.category ?? '(none)')?.adj ?? 0;
       errs.flat.push(ratioErr(0.25 * p.tvl_usd, p.mcap_usd!));
-      errs.curve.push(ratioErr(bare, p.mcap_usd!));
-      errs.curveCat.push(ratioErr(bare * Math.pow(10, adj), p.mcap_usd!));
+      errs.curveCat.push(ratioErr(Math.pow(10, predSize(p) + (catSize.get(p.category ?? '(none)')?.adj ?? 0)), p.mcap_usd!));
+      errs.full.push(ratioErr(Math.pow(10, predFull(p) + (catFull.get(p.category ?? '(none)')?.adj ?? 0)), p.mcap_usd!));
     }
   }
-  return { flat: median(errs.flat), curve: median(errs.curve), curveCat: median(errs.curveCat), folds: FOLDS, comps: comps.length };
+  return { flat: median(errs.flat), curveCat: median(errs.curveCat), full: median(errs.full), folds: FOLDS, comps: comps.length };
 }
 
 // ---------- farm plans ----------
@@ -313,8 +372,10 @@ export interface BoardRow {
   base_value_usd: number;
   category_adj_log10: number;
   category_comps: number;
-  growth_multiplier: number;
+  growth_term: number;
   maturity_multiplier: number;
+  range_low_usd: number;
+  range_high_usd: number;
   farm: Omit<FarmPlan, 'steps'>;
   farm_steps: string[];
 }
@@ -334,10 +395,11 @@ export interface RadarData {
   source: string;
   floor_usd: number;
   model_version: string;
-  fit: { a: number; b: number; r2: number; comps: number };
-  validation: { flat: number; curve: number; curveCat: number; folds: number; comps: number };
+  fit: { a: number; b: number; g: number; r2: number; comps: number; resid_q25: number; resid_q75: number };
+  validation: { flat: number; curveCat: number; full: number; folds: number; comps: number };
   funnel: Funnel;
   rows: BoardRow[];
+  comps: { t: number; m: number }[];
   live: { slug: string; name: string; category: string | null; tvl_usd: number; mcap_usd: number; multiple: number }[];
 }
 
@@ -363,14 +425,14 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
 
   const scored = [...chosen.values()].map((p) => {
     const { base, catAdj, catN } = baseValue(fit, p);
-    const t = tilts(p, snapshot.as_of);
-    const implied = Math.max(1, Math.round(base * t.growthMult * t.maturityMult));
-    return { p, base, catAdj, catN, t, implied };
+    const m = maturity(p, snapshot.as_of);
+    const implied = Math.max(1, Math.round(base * m.maturityMult));
+    return { p, base, catAdj, catN, m, implied };
   });
   scored.sort((x, y) => y.implied - x.implied || (x.p.slug < y.p.slug ? -1 : 1));
 
   const board: BoardRow[] = scored.map((s, i) => {
-    const plan = farmPlan(s.p, s.t.age);
+    const plan = farmPlan(s.p, s.m.age);
     const { steps, ...farm } = plan;
     return {
       rank: i + 1,
@@ -381,7 +443,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       tvl_usd: s.p.tvl_usd,
       change_7d: s.p.change_7d,
       listed_at: s.p.listed_at,
-      age_days: s.t.age,
+      age_days: s.m.age,
       token_status: 'pre-token',
       watchlist: watch.has(s.p.slug),
       implied_value_usd: s.implied,
@@ -389,37 +451,41 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       base_value_usd: Math.round(s.base),
       category_adj_log10: Math.round(s.catAdj * 1000) / 1000,
       category_comps: s.catN,
-      growth_multiplier: Math.round(s.t.growthMult * 1000) / 1000,
-      maturity_multiplier: Math.round(s.t.maturityMult * 1000) / 1000,
+      growth_term: Math.round(growthTerm(s.p) * 1000) / 1000,
+      maturity_multiplier: Math.round(s.m.maturityMult * 1000) / 1000,
+      range_low_usd: Math.max(1, Math.round(s.implied * Math.pow(10, fit.residQ25))),
+      range_high_usd: Math.round(s.implied * Math.pow(10, fit.residQ75)),
       farm,
       farm_steps: steps,
     };
   });
 
-  const live = snapshot.protocols
-    .filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0)
+  const compsAll = compsOf(snapshot);
+  const live = compsAll
     .sort((x, y) => (y.mcap_usd! - x.mcap_usd!) || (x.slug < y.slug ? -1 : 1))
     .slice(0, 24)
     .map((p) => ({ slug: p.slug, name: p.name, category: p.category, tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd!, multiple: Math.round((p.mcap_usd! / Math.max(1, p.tvl_usd)) * 1000) / 1000 }));
 
-  const tokenRecorded = snapshot.protocols.length - preCount;
+  const round4 = (v: number) => Math.round(v * 10000) / 10000;
+  const round3 = (v: number) => Math.round(v * 1000) / 1000;
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
     floor_usd: snapshot.floor_usd,
     model_version: MODEL_VERSION,
-    fit: { a: Math.round(fit.a * 10000) / 10000, b: Math.round(fit.b * 10000) / 10000, r2: Math.round(fit.r2 * 1000) / 1000, comps: fit.comps },
+    fit: { a: round4(fit.a), b: round4(fit.b), g: round4(fit.g), r2: round3(fit.r2), comps: fit.comps, resid_q25: round3(fit.residQ25), resid_q75: round3(fit.residQ75) },
     validation,
     funnel: {
       protocols: snapshot.protocols.length,
-      token_recorded: tokenRecorded,
-      token_with_mcap: snapshot.protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0).length,
+      token_recorded: snapshot.protocols.length - preCount,
+      token_with_mcap: compsAll.length,
       pre_token: preCount,
       excluded,
       board_rows: board.length,
       watchlist: snapshot.watchlist.length,
     },
     rows: board,
+    comps: compsAll.map((p) => ({ t: p.tvl_usd, m: p.mcap_usd! })),
     live,
   };
   return { board, radar };

@@ -14,19 +14,25 @@ The snapshot's live-token protocols are the comps: 128 of them record a
 market cap. On those, `lib/model.ts` fits by least squares on log10 scales
 
 ```
-log10(market cap) = 3.0247 + 0.5223 × log10(TVL)      (R² 0.194, n = 128)
+log10(market cap) = 2.8961 + 0.523 × log10(TVL) − 1.397 × momentum   (R² 0.203, n = 128)
+momentum = clamp(7-day TVL change, −25%, +25%) / 100
 ```
 
-(constants recomputed from the snapshot on every run, never typed in). A
-pre-token protocol's base value is the curve read at its own TVL, moved by
-its category's median residual among the comps (shrunk by n/(n+12)), then
-tilted by momentum (1 + clamped 7-day TVL change × 0.5) and by track record
-without a token (0.6–1.0 over three years).
+(constants recomputed from the snapshot on every run, never typed in).
+Momentum sits inside the fit, winsorized so one wild week moves a price at
+most ~2.2×; its fitted sign is negative — among tokens that already trade,
+freshly surging TVL prices cheaper per dollar. A pre-token protocol's base
+value is the fitted surface read at its own figures, moved by its
+category's median residual among the comps (shrunk by n/(n+12)), then
+tilted once, by track record without a token (0.6–1.0 over three years).
+Each row also carries the honest range: the middle half of the comps' own
+residuals carried onto its implied value.
 
 Graded the way it is used — 5-fold held out, deterministic folds — the
-model's median error is **3.55×**, against **4.96×** for the flat
-0.25 × TVL rule and 3.67× for the curve without its category term. The
-dashboard prints this table from the run's own computation.
+model's median error is **3.38×**, against **4.96×** for the flat
+0.25 × TVL rule and 3.55× for the size-only curve with its category term.
+The dashboard prints this table from the run's own computation, and plots
+every comp against the fitted line.
 
 ## The board
 
