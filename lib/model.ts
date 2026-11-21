@@ -1,4 +1,4 @@
-// Token launch radar — model "comps-3".
+// Token launch radar — model "comps-4".
 //
 // One sealed DefiLlama snapshot in, one ranked board out. Nothing here touches
 // the network and nothing is keyed to a protocol's name: every number a row
@@ -93,7 +93,7 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-export const MODEL_VERSION = 'comps-3';
+export const MODEL_VERSION = 'comps-4';
 
 /** Shrinkage for the category term: a category's median residual counts n/(n+K). */
 export const CATEGORY_SHRINK_K = 12;
@@ -108,7 +108,7 @@ export const UNKNOWN_AGE_DAYS = 365;
 /** Gas per transaction in USD by main chain: the farm plan's price list, stated in the dashboard. */
 export const GAS_USD: Record<string, number> = {
   Ethereum: 12, Solana: 0.05, Base: 0.8, Arbitrum: 0.6, Optimism: 0.6,
-  'BNB Chain': 0.4, Polygon: 0.1, Avalanche: 0.5, Tron: 0.3, Sui: 0.05, Aptos: 0.05,
+  'BNB Chain': 0.4, Binance: 0.4, Polygon: 0.1, Avalanche: 0.5, Tron: 0.3, Sui: 0.05, Aptos: 0.05,
 };
 export const GAS_DEFAULT_USD = 0.5;
 
@@ -293,25 +293,27 @@ function oddsFeatures(snapshot: Snapshot, p: SnapshotProtocol): number[] {
   return [1, Math.log10(Math.max(1, p.tvl_usd)), Math.log10(1 + age)];
 }
 
+const dot = (a: number[], b: number[]): number => a.reduce((s, v, i) => s + v * b[i]!, 0);
+
 /** Logistic regression by Newton-Raphson on the normal equations, tiny ridge for stability. */
 function fitLogistic(rows: OddsRow[]): number[] {
-  let beta = [0, 0, 0];
+  const K = rows[0]?.x.length ?? 4;
+  let beta = Array.from({ length: K }, () => 0);
   for (let iter = 0; iter < 100; iter++) {
-    const g = [0, 0, 0];
-    const H = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    const g = Array.from({ length: K }, () => 0);
+    const H = Array.from({ length: K }, () => Array.from({ length: K }, () => 0));
     for (const r of rows) {
-      const z = beta[0]! * r.x[0]! + beta[1]! * r.x[1]! + beta[2]! * r.x[2]!;
-      const p = sigmoid(z);
+      const p = sigmoid(dot(beta, r.x));
       const w = Math.max(1e-9, p * (1 - p));
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < K; i++) {
         g[i]! += r.x[i]! * (r.y - p);
-        for (let j = 0; j < 3; j++) H[i]![j]! += r.x[i]! * r.x[j]! * w;
+        for (let j = 0; j < K; j++) H[i]![j]! += r.x[i]! * r.x[j]! * w;
       }
     }
-    H[0]![0]! += 1e-6; H[1]![1]! += 1e-6; H[2]![2]! += 1e-6;
+    for (let i = 0; i < K; i++) H[i]![i]! += 1e-6;
     const step = solve(H, g);
     let mx = 0;
-    for (let i = 0; i < 3; i++) { beta[i]! += step[i]!; mx = Math.max(mx, Math.abs(step[i]!)); }
+    for (let i = 0; i < K; i++) { beta[i]! += step[i]!; mx = Math.max(mx, Math.abs(step[i]!)); }
     if (mx < 1e-10) break;
   }
   return beta;
@@ -351,7 +353,7 @@ export function fitPrecedent(snapshot: Snapshot): OddsFit {
     const train = rows.filter((_, i) => i % FOLDS !== f);
     const test = rows.filter((_, i) => i % FOLDS === f);
     const c = fitLogistic(train);
-    for (const r of test) held.push({ p: sigmoid(c[0]! * r.x[0]! + c[1]! * r.x[1]! + c[2]! * r.x[2]!), y: r.y });
+    for (const r of test) held.push({ p: sigmoid(dot(c, r.x)), y: r.y });
   }
   const brier = held.reduce((s, r) => s + (r.p - r.y) ** 2, 0) / held.length;
   const base = rows.reduce((s, r) => s + r.y, 0) / rows.length;
@@ -366,7 +368,7 @@ export function fitPrecedent(snapshot: Snapshot): OddsFit {
 
 export function precedentPct(fit: OddsFit, snapshot: Snapshot, p: SnapshotProtocol): number {
   const x = oddsFeatures(snapshot, p);
-  return Math.round(100 * sigmoid(fit.coef[0]! * x[0]! + fit.coef[1]! * x[1]! + fit.coef[2]! * x[2]!));
+  return Math.round(100 * sigmoid(dot(fit.coef, x)));
 }
 
 /** Category peer counts over the whole snapshot: how many peers record a token. */
@@ -393,6 +395,10 @@ export interface FarmPlan {
   verdict: 'FARM' | 'THIN' | 'SKIP';
   verdict_reason: string;
   steps: string[];
+  /** Set only when the plan routes gas to a cheaper chain in the protocol's own list. */
+  routed_chain?: string;
+  original_chain?: string;
+  original_gas?: number;
 }
 
 function capitalFor(tvl: number): number {
@@ -438,34 +444,90 @@ function actionsFor(p: SnapshotProtocol): { primary: string; secondary: string }
   return { primary: `deposit USDC into ${n} and keep the position open`, secondary: `make a second, smaller deposit from the same wallet` };
 }
 
+/** Four rotating weekly actions per category family — the week-by-week execution schedule. */
+function weeklyActionsFor(p: SnapshotProtocol): string[] {
+  const c = (p.category ?? '').toLowerCase();
+  const n = p.name;
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral'))
+    return [`deposit extra USDC collateral to ${n}`, `repay a slice of the borrow, then borrow it back`, `claim any lending rewards ${n} shows for the wallet`, `rebalance the collateral ratio on ${n} back to its starting level`];
+  if (c.includes('dex') || c.includes('amm'))
+    return [`swap a small USDC amount through ${n}'s main pool`, `add a little liquidity to a second ${n} pair`, `claim the LP fees ${n} accrued for the wallet`, `rebalance the liquidity position in ${n} to the current price`];
+  if (c.includes('curator') || c.includes('allocator'))
+    return [`deposit a small extra amount into the primary ${n} vault`, `shift a small share of the position to ${n}'s second vault`, `claim the vault yield ${n} shows for the wallet`, `rebalance the position between ${n}'s vaults`];
+  if (c.includes('derivative') || c.includes('perpetual'))
+    return [`adjust the margin on the hedged ${n} position`, `close one leg of the hedge and reopen it at the current price`, `claim any funding or rebate ${n} shows for the wallet`, `open a second small hedge in a different ${n} pair`];
+  if (c.includes('prediction'))
+    return [`take a small position in a different ${n} market`, `exit part of an existing ${n} position`, `claim any resolved winnings from ${n}`, `re-enter a ${n} market with updated sizing`];
+  if (c.includes('yield'))
+    return [`claim the yield from ${n}'s vault and redeposit it`, `deposit a small extra amount into ${n}`, `compare ${n}'s vaults and shift to the best rate`, `compound the accumulated rewards inside ${n}`];
+  if (c.includes('rwa'))
+    return [`mint a small additional amount of ${n}'s yield asset`, `redeem a small part of the ${n} position and mint it again`, `claim any distribution ${n} shows for the wallet`, `review and renew the ${n} position`];
+  return [`deposit a small extra amount into ${n}`, `use a secondary feature of ${n}'s app`, `claim any rewards ${n} shows for the wallet`, `rebalance or renew the ${n} position`];
+}
+
+/** The cheapest gas chain in a protocol's own chain list — plans route there when it beats the main chain. */
+function bestChain(chains: string[]): { chain: string; gas: number; routed: boolean; original_chain: string; original_gas: number } {
+  if (chains.length === 0)
+    return { chain: 'its main chain', gas: GAS_DEFAULT_USD, routed: false, original_chain: 'its main chain', original_gas: GAS_DEFAULT_USD };
+  const primary = chains[0]!;
+  const primaryGas = GAS_USD[primary] ?? GAS_DEFAULT_USD;
+  let bestName = primary;
+  let bestGas = primaryGas;
+  for (const ch of chains) {
+    const g = GAS_USD[ch];
+    if (g !== undefined && g < bestGas) { bestName = ch; bestGas = g; }
+  }
+  return { chain: bestName, gas: bestGas, routed: bestName !== primary, original_chain: primary, original_gas: primaryGas };
+}
+
 const money = (v: number): string => (v >= 100 ? `$${Math.round(v)}` : `$${v.toFixed(2)}`);
 
-/** A protocol's costed farm plan: every step names its cost and its time. */
+/** A protocol's costed farm plan: gas routed to the cheapest of its own chains, a week-by-week schedule, every step costed and timed. */
 export function farmPlan(p: SnapshotProtocol, age: number | null): FarmPlan {
-  const chain = p.chains.length > 0 ? p.chains[0]! : 'its main chain';
-  const gas = GAS_USD[chain] ?? GAS_DEFAULT_USD;
+  const route = bestChain(p.chains);
+  const chain = route.chain;
+  const gas = route.gas;
   const capital = capitalFor(p.tvl_usd);
   const weeks = weeksFor(age);
   const txCount = weeks + 5; // wallet setup, primary, secondary, one weekly action per week, claim, exit
   const fees = Math.round(gas * txCount * 100) / 100;
   const drag = fees / capital;
   const verdict = drag <= FARM_MAX_DRAG ? 'FARM' : drag <= THIN_MAX_DRAG ? 'THIN' : 'SKIP';
-  const verdict_reason = verdict === 'FARM'
+  let verdict_reason = verdict === 'FARM'
     ? `fees of ${money(fees)} are ${(drag * 100).toFixed(1)}% of the ${money(capital)} position, under the 5% FARM line`
     : verdict === 'THIN'
       ? `fees of ${money(fees)} are ${(drag * 100).toFixed(1)}% of the ${money(capital)} position: farm only with a larger position or a cheaper chain`
       : `fees of ${money(fees)} eat ${(drag * 100).toFixed(1)}% of the ${money(capital)} position, over the 15% SKIP line at this size`;
+  if (route.routed) {
+    const origFees = Math.round(route.original_gas * txCount * 100) / 100;
+    const origDrag = origFees / capital;
+    const origVerdict = origDrag <= FARM_MAX_DRAG ? 'FARM' : origDrag <= THIN_MAX_DRAG ? 'THIN' : 'SKIP';
+    verdict_reason += ` — routed from ${route.original_chain} at ${money(route.original_gas)} a transaction, where the same plan would be ${origVerdict} at ${(origDrag * 100).toFixed(1)}% drag`;
+  }
   const { primary, secondary } = actionsFor(p);
+  const rotation = weeklyActionsFor(p);
   const steps = [
-    `Open a fresh wallet for ${p.name} alone and keep its seed phrase offline on paper. Cost: ${money(gas)} for the first ${chain} transaction. Time: 5 minutes.`,
+    `Open a fresh wallet for ${p.name} alone and keep its seed phrase offline on paper. Cost: ${money(gas)} for the first ${chain} transaction${route.routed ? ` — the plan runs on ${chain}, the cheapest chain in ${p.name}'s own list, not on ${route.original_chain} at ${money(route.original_gas)} a transaction` : ''}. Time: 5 minutes.`,
     `Capital step: ${primary}. Cost: ${money(capital)} of capital plus ${money(gas)} of ${chain} gas. Time: 15 minutes to set up.`,
     `Second action: ${secondary}. Cost: ${money(gas)} of ${chain} gas, no new capital. Time: 10 minutes.`,
-    `Repeat one qualifying action a week for ${weeks} weeks (a deposit, a swap, a claim or a vote in ${p.name}'s app). Cost: ${money(gas)} a week, ${money(gas * weeks)} in all. Time: 10 minutes a week.`,
-    `Hold the ${money(capital)} position for the full ${weeks} weeks so the activity spans more than one weekly snapshot. Cost: the capital stays locked; the whole plan's fees come to ${money(fees)}. Time: ${weeks} weeks.`,
-    `Check ${p.name}'s own points or rewards page and claim only from the link it publishes; never pay a third party to claim. Cost: ${money(gas)} of gas, and no fee to check. Time: 10 minutes.`,
-    `Log the wallet, the dates and every transaction hash, then unwind or roll the position by the same steps in reverse. Cost: ${money(gas)} of gas to exit. Time: 10 minutes.`,
   ];
-  return { capital_usd: capital, gas_per_tx_usd: gas, weeks, fees_usd: fees, fee_drag_pct: Math.round(drag * 1000) / 10, verdict, verdict_reason, steps };
+  // Week-by-week schedule: at most 5 weeks spelled out, the rest summarised — keeps every plan inside the 12-step gate.
+  const MAX_WEEK_STEPS = 5;
+  const detailedWeeks = Math.min(weeks, MAX_WEEK_STEPS);
+  for (let w = 0; w < detailedWeeks; w++) {
+    const action = rotation[w % rotation.length]!;
+    steps.push(`Week ${w + 1}: ${action}. Cost: ${money(gas)} of ${chain} gas; cumulative plan fees so far ${money(gas * (4 + w))}. Time: 10 minutes.`);
+  }
+  if (weeks > MAX_WEEK_STEPS) {
+    const remaining = weeks - MAX_WEEK_STEPS;
+    steps.push(`Weeks ${MAX_WEEK_STEPS + 1}–${weeks}: keep the same weekly rotation for ${remaining} more weeks, one transaction a week. Cost: ${money(gas * remaining)} of ${chain} gas in all. Time: 10 minutes a week.`);
+  }
+  steps.push(`Hold the ${money(capital)} position open across the whole ${weeks}-week schedule so the activity spans more than one weekly snapshot. Cost: the capital stays locked; the whole plan's fees come to ${money(fees)}. Time: ${weeks} weeks.`);
+  steps.push(`Check ${p.name}'s own points or rewards page and claim only from the link it publishes; never pay a third party to claim. Cost: ${money(gas)} of gas, and no fee to check. Time: 10 minutes.`);
+  steps.push(`Log the wallet, the dates and every transaction hash, then unwind or roll the position by the same steps in reverse. Cost: ${money(gas)} of gas to exit. Time: 10 minutes.`);
+  const plan: FarmPlan = { capital_usd: capital, gas_per_tx_usd: gas, weeks, fees_usd: fees, fee_drag_pct: Math.round(drag * 1000) / 10, verdict, verdict_reason, steps };
+  if (route.routed) { plan.routed_chain = chain; plan.original_chain = route.original_chain; plan.original_gas = route.original_gas; }
+  return plan;
 }
 
 // ---------- the board ----------

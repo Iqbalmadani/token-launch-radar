@@ -48,17 +48,20 @@ record a token).
 the watchlist's own exclusion rules let through (no wrapped/staked/bridged
 product, no versioned pool, no exchange product), at any TVL. Each row
 carries a farm plan costed from the row itself — capital tier from TVL, gas
-from its main chain, hold from its age, actions from its category — with a
-verdict from fee drag: FARM ≤ 5%, THIN ≤ 15%, SKIP above.
+routed to the cheapest chain in the protocol's own chain list, hold from
+its age, actions from its category — laid out as a week-by-week execution
+schedule with cumulative fees, and verdicted on fee drag: FARM ≤ 5%,
+THIN ≤ 15%, SKIP above. When routing changes the chain, the plan says what
+the same schedule would have cost on the main chain.
 
 The dashboard is static and renders fully offline: sortable, filterable,
 exportable to CSV, with pins, a side-by-side compare view for up to three
-protocols, and a Ctrl+K command palette. Each protocol's detail view has
-three tabs — the costed farm plan; the model math, recomputed in the page
-from the printed fits (value and precedent alike); and a capital
-simulator that runs the plan's economics under stated reward assumptions
-(pool size and wallet share, both set by the reader) and reports the
-reward range, the net of fees, and the break-even pool.
+protocols, and a Ctrl+K command palette. Each protocol's detail view shows
+the costed farm plan and a capital simulator side by side — the simulator
+runs the plan's economics under stated reward assumptions (pool size and
+wallet share, both set by the reader) and reports the reward range, the
+net of fees, and the break-even pool — with the model math, recomputed in
+the page from the printed fits (value and precedent alike), below them.
 
 ## Run it
 

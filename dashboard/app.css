@@ -118,3 +118,24 @@ span.chip{color:var(--text);border-color:var(--line)}
 #pallist li.none{cursor:default}
 @media (max-width:900px){.kpis{grid-template-columns:repeat(3,1fr)}.stats{grid-template-columns:repeat(2,1fr)}h1{font-size:23px}.sim{grid-template-columns:1fr}.bar-row{grid-template-columns:110px 1fr 76px}}
 @media (max-width:560px){.kpis{grid-template-columns:repeat(2,1fr)}}
+/* v4: detail split — farm plan and simulator side by side, model math collapsible below */
+.detail-split{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:0 0 16px;align-items:start}
+.dcol{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.dcol h3{font-size:15px;margin:0 0 10px;font-weight:700}
+.dcol .steps{margin:8px 0 0;padding-left:20px}
+.dcol .steps li{margin-bottom:7px;font-size:13px}
+.sim-compact{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:8px 0 12px}
+.sim-compact label{color:var(--dim);font-size:12px;display:flex;flex-direction:column;gap:4px}
+.sim-compact input{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:7px 9px;font-size:14px;font-family:var(--mono)}
+.stats.s2{grid-template-columns:repeat(2,1fr)}
+details.panel summary{cursor:pointer;font-size:15px;font-weight:700;padding:2px 0}
+.badge.route{font-size:10px}
+@media (max-width:900px){.detail-split{grid-template-columns:1fr}.sim-compact{grid-template-columns:1fr}}
+/* v4 visual density */
+.board th{background:var(--panel2);position:sticky;top:0;z-index:2}
+.badge{font-weight:800;text-transform:uppercase}
+.kpi{background:linear-gradient(135deg,var(--panel) 60%,var(--panel2));transition:border-color .2s}
+.kpi:hover{border-color:var(--faint)}
+h1{background:linear-gradient(90deg,var(--text),var(--amber));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.board tbody tr:nth-child(even){background:rgba(255,255,255,.015)}
+.routed{color:var(--sky);font-size:11px;font-family:var(--mono)}

@@ -71,7 +71,6 @@ function modelPanel() {
     the comps (shrunk by n/(n+12) so thin categories barely count), then tilted once, by track record
     (0.6–1.0 over three years without a token). No protocol's name is an input. The grading below is 5-fold held-out,
     recomputed on every run of the program: each fold's comps are predicted from a fit on the other four.</p>
-    ${scatter()}
     <table class="val"><thead><tr><th>Model</th><th>Median held-out error</th><th>Reading</th></tr></thead><tbody>
       <tr><td>Flat 0.25 × TVL (the starter rule)</td><td>${v.flat.toFixed(2)}x</td><td>a typical comp is missed by this factor</td></tr>
       <tr><td>Size-only curve + category term</td><td>${v.curveCat.toFixed(2)}x</td><td>TVL alone, fitted</td></tr>
@@ -85,7 +84,10 @@ function modelPanel() {
     exception, not the rule. Graded ${o.folds}-fold held-out like the value model: <b>AUC ${o.auc}</b> (0.5 is guessing) and
     <b>Brier ${o.brier}</b>, against ${o.base_brier} for always answering the base rate — a modest, honest edge, printed
     because a radar should show its instruments' limits. Each board row carries the estimate plus the raw count behind it:
-    how many of its category peers already record a token. It is a precedent rate, never a promise that a token comes.</p>
+    how many of its category peers already record a token. It is a precedent rate, never a promise that a token comes.
+    A chain-count term (how many chains a protocol runs on) was tried as a third predictor and rejected: it graded worse
+    held out (AUC 0.611 against this model's ${o.auc}), so it is not in the fit.</p>
+    ${scatter()}
   </section>`;
 }
 
@@ -143,7 +145,7 @@ function boardView() {
     <td>${r.age_days === null ? '—' : fmtN(r.age_days) + 'd'}</td>
     <td><b>${r.precedent_pct}%</b><span class="slug">${r.peer_token}/${r.peer_total} peers tokened</span></td>
     <td><b>${fmt$(r.implied_value_usd)}</b></td>
-    <td><span class="badge ${r.farm.verdict}">${r.farm.verdict}</span></td>
+    <td><span class="badge ${r.farm.verdict}">${r.farm.verdict}</span>${r.farm.routed_chain ? `<span class="routed">→ ${esc(r.farm.routed_chain)}</span>` : ''}</td>
     <td class="tools"><button class="tool pinb" data-pin="${esc(r.slug)}" title="Pin this protocol">${pins.has(r.slug) ? 'pinned' : 'pin'}</button><label class="cmpl" title="Select to compare"><input type="checkbox" data-cmp="${esc(r.slug)}" ${cmp.includes(r.slug) ? 'checked' : ''}> cmp</label></td></tr>`).join('');
   const pinStrip = pins.size === 0 ? '' : `<div class="strip"><span class="strip-label">Pinned:</span>${[...pins].map((s) => `<a class="chip" href="#/p/${esc(s)}">${esc(bySlug.get(s).name)}</a>`).join('')}<button class="tool" id="clearpins">clear pins</button></div>`;
   const cmpBar = cmp.length === 0 ? '' : `<div class="strip cmpstrip"><span class="strip-label">Compare (${cmp.length}/3):</span>${cmp.map((s) => `<span class="chip">${esc(bySlug.get(s).name)}</span>`).join('')}<button class="tool go" id="gocmp" ${cmp.length < 2 ? 'disabled' : ''}>compare side by side →</button><button class="tool" id="clearcmp">clear</button></div>`;
@@ -207,8 +209,7 @@ function compareView() {
   <p class="note">Every figure is the board's own: implied values from the fitted surface, ranges from the comps' residuals, precedent from the logistic fit and its peer counts, farm figures from each protocol's costed plan.</p></section>`;
 }
 
-/* ---------- detail view: tabs for plan, model math, simulator ---------- */
-let dtab = 'plan';
+/* ---------- detail view: farm plan and simulator side by side, model math below ---------- */
 const simState = new Map();
 function simFor(r) {
   if (!simState.has(r.slug)) simState.set(r.slug, { capital: r.farm.capital_usd, pool: 2, share: 0.25 });
@@ -225,28 +226,27 @@ function simCalc(r) {
     breakeven: r.implied_value_usd * s.share > 0 ? (fees / (r.implied_value_usd * s.share)) * 10000 : 0,
   };
 }
-function simPanel(r) {
+function simColumn(r) {
   const s = simFor(r), c = simCalc(r);
   const num = (id, val, step) => `<input type="number" id="${id}" value="${val}" step="${step}" min="0">`;
-  return `<section class="panel"><h2>Capital simulator — what the plan pays under stated assumptions</h2>
+  return `<div class="dcol"><h3>Capital simulator — what the plan pays under stated assumptions</h3>
     <p class="note">Scenario arithmetic, not a forecast. You set three assumptions; the page does the rest from this row's own
     figures. The reward pool is the share of the launch's implied value you assume is paid to farmers; your share is the slice
     of that pool you assume this one wallet earns. The plan's fees are gas-driven and do not scale with capital.</p>
-    <div class="sim">
+    <div class="sim-compact">
       <label>Your capital (USD) ${num('simcap', s.capital, '10')}</label>
-      <label>Reward pool, % of implied value ${num('simpool', s.pool, '0.5')}</label>
+      <label>Reward pool, % of implied ${num('simpool', s.pool, '0.5')}</label>
       <label>Your share of the pool, % ${num('simshare', s.share, '0.1')}</label>
     </div>
-    <div class="stats">
+    <div class="stats s2">
       <div class="stat"><b>${fmt$(c.low)} – ${fmt$(c.high)}</b><span>reward at the honest range</span></div>
       <div class="stat"><b>${fmt$(c.mid)}</b><span>reward at the implied value</span></div>
       <div class="stat"><b class="${c.net >= 0 ? 'pos' : 'neg'}">${c.net >= 0 ? '+' : '−'}${fmt$(Math.abs(c.net))}</b><span>net of the plan's $${c.fees.toFixed(2)} fees, at implied</span></div>
       <div class="stat"><b>${c.roi.toFixed(1)}%</b><span>net return on your capital</span></div>
     </div>
     <p class="note">Break-even: the pool would need to be <b>${c.breakeven.toFixed(2)}%</b> of the implied value (at your assumed share)
-    for the reward to cover the plan's fees alone. Compare that with what launches in this category have historically shared —
-    the model's job is the value and the precedent; the assumptions, and the call, are yours.</p>
-  </section>`;
+    for the reward to cover the plan's fees alone. The model's job is the value and the precedent; the assumptions, and the call, are yours.</p>
+  </div>`;
 }
 
 function detailView(r) {
@@ -255,13 +255,11 @@ function detailView(r) {
   const drift = Math.abs(recomputed - r.implied_value_usd) / r.implied_value_usd;
   const prec = Math.round(100 * sigmoid(o.a + o.b * Math.log10(Math.max(1, r.tvl_usd)) + o.c * Math.log10(1 + (r.age_days ?? 365))));
   const stat = (b, s) => `<div class="stat"><b>${b}</b><span>${s}</span></div>`;
-  const tabs = [['plan', 'Farm plan'], ['math', 'Model math'], ['sim', 'Simulator']].map(([k, t]) => `<button class="tab ${dtab === k ? 'on' : ''}" data-tab="${k}">${t}</button>`).join('');
-  let body = '';
-  if (dtab === 'plan') body = `<section class="panel"><h2>Farm plan — costed, with a verdict</h2>
-    <div class="planhead"><span class="badge ${r.farm.verdict}">${r.farm.verdict}</span><span class="why">${esc(r.farm.verdict_reason)}. Gas is priced on ${esc(r.chains[0] || 'its main chain')} at $${r.farm.gas_per_tx_usd} a transaction, the plan's stated rate.</span></div>
+  const planCol = `<div class="dcol"><h3>Farm plan — costed, with a verdict</h3>
+    <div class="planhead"><span class="badge ${r.farm.verdict}">${r.farm.verdict}</span>${r.farm.routed_chain ? `<span class="badge FARM route">ROUTED → ${esc(r.farm.routed_chain)}</span>` : ''}<span class="why">${esc(r.farm.verdict_reason)}. Gas is priced on ${esc(r.farm.routed_chain || r.chains[0] || 'its main chain')} at $${r.farm.gas_per_tx_usd} a transaction, the plan's stated rate.</span></div>
     <ol class="steps">${r.farm_steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
-  </section>`;
-  else if (dtab === 'math') body = `<section class="panel"><h2>How this value is derived — recomputed here, in the page</h2>
+  </div>`;
+  const mathSection = `<details class="panel"><summary>Model math — how this value is derived, recomputed here in the page</summary>
     <div class="calc">
       size line&nbsp;&nbsp;&nbsp;= 10^(${f.a} + ${f.b} × log10(${fmtN(r.tvl_usd)})) = ${fmt$(Math.pow(10, f.a + f.b * Math.log10(Math.max(1, r.tvl_usd))))}<br>
       momentum term = 10^(${f.g} × ${r.growth_term}) — its 7-day TVL change of ${pct(r.change_7d)}, winsorized, inside the fit<br>
@@ -273,8 +271,8 @@ function detailView(r) {
     </div>
     <p class="note">Read it as the market's own pricing carried across: protocols like this one, at this size, in this category,
     trade at these values today. It is a claim about what a launch would be worth if the record stayed as it is — not a prediction that a token comes.</p>
-  </section>`;
-  else body = simPanel(r);
+  </details>`;
+  const body = `<div class="detail-split">${planCol}${simColumn(r)}</div>${mathSection}`;
   return `<p><a class="back" href="#/">← back to the board</a> &nbsp;<button class="tool pinb" data-pin="${esc(r.slug)}">${pins.has(r.slug) ? 'pinned' : 'pin this protocol'}</button></p>
   <div class="dhead"><h2>${esc(r.name)}</h2><span class="badge ${r.farm.verdict}">${r.farm.verdict}</span>${r.watchlist ? '<span class="watch">ON THE WATCHLIST</span>' : '<span class="slug">found under the watchlist floor</span>'}</div>
   <p class="note">${esc(r.slug)} · ${esc(r.category || 'uncategorised')} · on ${esc(r.chains.join(', ') || 'no named chain')} · records no token in the ${R.as_of} snapshot (no market cap, no CoinGecko id, no symbol).</p>
@@ -288,7 +286,6 @@ function detailView(r) {
     ${stat('$' + r.farm.fees_usd.toFixed(2), `plan fees · ${r.farm.fee_drag_pct}% of capital`)}
     ${stat(r.farm.weeks + ' weeks', 'plan hold')}
   </div>
-  <div class="tabs">${tabs}</div>
   ${body}`;
 }
 
@@ -333,11 +330,10 @@ function render() {
   if (m && bySlug.has(m[1])) {
     app.innerHTML = detailView(bySlug.get(m[1]));
     window.scrollTo(0, 0);
-    app.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { dtab = b.dataset.tab; render(); }));
     app.querySelectorAll('[data-pin]').forEach((b) => b.addEventListener('click', () => { pins.has(b.dataset.pin) ? pins.delete(b.dataset.pin) : pins.add(b.dataset.pin); render(); }));
     const r = bySlug.get(m[1]), s = simFor(r);
     const wire = (id, key, parse) => { const el = $(id); if (el) el.addEventListener('input', () => { s[key] = parse(el.value); render(); const n = $(id); if (n) { n.focus(); n.setSelectionRange(String(n.value).length, String(n.value).length); } }); };
-    if (dtab === 'sim') { wire('#simcap', 'capital', Number); wire('#simpool', 'pool', Number); wire('#simshare', 'share', Number); }
+    wire('#simcap', 'capital', Number); wire('#simpool', 'pool', Number); wire('#simshare', 'share', Number);
   } else if (location.hash === '#/compare' && cmp.length >= 2) {
     app.innerHTML = compareView();
     window.scrollTo(0, 0);
@@ -374,4 +370,5 @@ $('#foot').innerHTML =
   `on the same snapshot rates how token-like each profile is; track record tilts the ranking; ` +
   `farm plans are costed from each protocol's own chain, category, TVL and age, and verdicted on fee drag (FARM ≤ 5%, THIN ≤ 15%, SKIP above).</p>` +
   `<p>Gas price list used by every plan (per transaction): Ethereum $12 · Base $0.80 · Arbitrum $0.60 · Optimism $0.60 · Avalanche $0.50 · BNB Chain $0.40 · Tron $0.30 · Polygon $0.10 · Solana $0.05 · Sui $0.05 · Aptos $0.05 · any other chain $0.50. ` +
+  `When a protocol operates on several chains, its plan routes to the cheapest gas chain in its own list, and the plan says so. ` +
   `The page renders with no network; the board it shows is the board.json the program wrote, and each detail view recomputes its value and its precedent from the printed fits.</p>`;
